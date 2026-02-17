@@ -3,6 +3,16 @@ import usePartySocket from 'partysocket/react';
 import { CANVAS_WIDTH, CANVAS_HEIGHT, PARTYKIT_HOST } from '../constants';
 import { MessageType, PixelData } from '../types';
 
+// Decode base64 string → Uint8Array
+function base64ToUint8(b64: string): Uint8Array {
+  const raw = atob(b64);
+  const arr = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) {
+    arr[i] = raw.charCodeAt(i);
+  }
+  return arr;
+}
+
 interface UseGameConnectionProps {
   onPixelUpdate: (pixel: PixelData) => void;
   onFullUpdate: (buffer: Uint8Array) => void;
@@ -103,6 +113,17 @@ export const useGameConnection = ({ onPixelUpdate, onFullUpdate }: UseGameConnec
               initExpectedSize.current = message.payload.totalSize;
               isReceivingInit.current = true;
               break;
+            case 'CANVAS_CHUNK': {
+              // Server sends canvas data as base64-encoded text chunks
+              if (!isReceivingInit.current) break;
+              const decoded = base64ToUint8(message.payload);
+              initChunks.current.push(decoded);
+              initReceived.current += decoded.length;
+              if (initReceived.current >= initExpectedSize.current) {
+                assembleChunks();
+              }
+              break;
+            }
             case 'INIT_END':
               // Fallback: if we haven't assembled yet, do it now
               if (isReceivingInit.current && initReceived.current >= initExpectedSize.current) {

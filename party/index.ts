@@ -26,6 +26,15 @@ function generateName(): string {
   return `${adj}${noun}${num}`;
 }
 
+// Encode Uint8Array → base64 string (works in CF Workers + Node)
+function uint8ToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
 // --- PartyKit Server ---
 export default class PixelPlacerServer implements Party.Server {
   canvas: Uint8Array;
@@ -40,19 +49,33 @@ export default class PixelPlacerServer implements Party.Server {
 
   // Called once when the room is first created or wakes from hibernation
   async onStart(): Promise<void> {
-    await this.loadCanvas();
-    // Schedule periodic saves via alarm
-    this.room.storage.setAlarm(Date.now() + SAVE_INTERVAL_MS);
+    try {
+      await this.loadCanvas();
+    } catch (e) {
+      console.error("Failed to load canvas in onStart:", e);
+    }
+    try {
+      this.room.storage.setAlarm(Date.now() + SAVE_INTERVAL_MS);
+    } catch (e) {
+      console.error("Failed to set alarm in onStart:", e);
+    }
   }
 
   // Alarm fires periodically to save canvas state
   async onAlarm(): Promise<void> {
-    if (this.dirty) {
-      await this.saveCanvas();
-      this.dirty = false;
+    try {
+      if (this.dirty) {
+        await this.saveCanvas();
+        this.dirty = false;
+      }
+    } catch (e) {
+      console.error("Failed to save canvas in onAlarm:", e);
     }
-    // Re-schedule next alarm
-    this.room.storage.setAlarm(Date.now() + SAVE_INTERVAL_MS);
+    try {
+      this.room.storage.setAlarm(Date.now() + SAVE_INTERVAL_MS);
+    } catch (e) {
+      console.error("Failed to re-schedule alarm:", e);
+    }
   }
 
   // Load canvas from durable storage (chunked)
@@ -113,31 +136,36 @@ export default class PixelPlacerServer implements Party.Server {
 
   // New client connects
   async onConnect(conn: Party.Connection): Promise<void> {
-    const username = generateName();
-    this.usernames.set(conn.id, username);
-    console.log(`Connected: ${username} (${conn.id})`);
+    try {
+      const username = generateName();
+      this.usernames.set(conn.id, username);
+      console.log(`Connected: ${username} (${conn.id})`);
 
-    // Send full canvas state as binary chunks (must stay under 1MB per message)
-    const totalChunks = Math.ceil(this.canvas.length / SEND_CHUNK_SIZE);
+      // Send canvas as base64-encoded text chunks (avoids binary WS issues on CF Workers)
+      const CHUNK_BYTES = 300_000; // 300K pixels per chunk → ~400KB base64 text
+      const totalChunks = Math.ceil(this.canvas.length / CHUNK_BYTES);
 
-    // Tell client how many binary chunks to expect
-    conn.send(JSON.stringify({
-      type: "INIT_START",
-      payload: { totalSize: this.canvas.length, chunks: totalChunks }
-    }));
+      conn.send(JSON.stringify({
+        type: "INIT_START",
+        payload: { totalSize: this.canvas.length, chunks: totalChunks }
+      }));
 
-    // Send each chunk as raw binary
-    for (let i = 0; i < totalChunks; i++) {
-      const start = i * SEND_CHUNK_SIZE;
-      const end = Math.min(start + SEND_CHUNK_SIZE, this.canvas.length);
-      conn.send(this.canvas.slice(start, end));
+      for (let i = 0; i < totalChunks; i++) {
+        const start = i * CHUNK_BYTES;
+        const end = Math.min(start + CHUNK_BYTES, this.canvas.length);
+        const chunk = this.canvas.slice(start, end);
+        conn.send(JSON.stringify({
+          type: "CANVAS_CHUNK",
+          payload: uint8ToBase64(chunk)
+        }));
+      }
+
+      conn.send(JSON.stringify({ type: "INIT_END" }));
+
+      this.broadcastUserCount();
+    } catch (e) {
+      console.error("Error in onConnect:", e);
     }
-
-    // Signal init complete
-    conn.send(JSON.stringify({ type: "INIT_END" }));
-
-    // Broadcast updated user count to everyone
-    this.broadcastUserCount();
   }
 
   // Receive a message from a client
