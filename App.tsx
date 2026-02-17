@@ -58,7 +58,7 @@ const App: React.FC = () => {
     return () => clearInterval(interval);
   }, []);
 
-  const [, setForceUpdate] = useState(0);
+  const [canvasVersion, setCanvasVersion] = useState(0);
 
   // Helper to draw a single pixel to the DOM canvas directly
   const drawPixelToCanvas = useCallback((x: number, y: number, colorIndex: number) => {
@@ -98,7 +98,7 @@ const App: React.FC = () => {
 
   const handleFullUpdate = useCallback((buffer: Uint8Array) => {
     pixelsRef.current = buffer;
-    setForceUpdate(n => n + 1); 
+    setCanvasVersion(n => n + 1); // triggers CanvasBoard to redraw immediately
   }, []);
 
   const { isConnected, userCount, placePixel } = useGameConnection({
@@ -144,6 +144,7 @@ const App: React.FC = () => {
         onHover={setHoveredCoords}
         tool={tool}
         canvasElRef={canvasElRef}
+        canvasVersion={canvasVersion}
       />
 
       {/* Floating Labels */}

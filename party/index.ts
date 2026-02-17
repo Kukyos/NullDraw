@@ -9,7 +9,7 @@ const TOTAL_PIXELS = WIDTH * HEIGHT; // 2,073,600 bytes
 // We chunk the canvas into rows-per-chunk to stay well under that.
 const ROWS_PER_CHUNK = 64;
 const CHUNK_COUNT = Math.ceil(HEIGHT / ROWS_PER_CHUNK); // 17 chunks
-const SAVE_INTERVAL_MS = 30_000; // auto-save every 30s
+const SAVE_INTERVAL_MS = 30_000; // auto-save to durable storage every 30s (updates are broadcast live via WebSocket instantly)
 
 // Cloudflare WebSocket messages have a ~1MB limit.
 // 1920*1080 = 2MB, so we must send initial state in chunks.

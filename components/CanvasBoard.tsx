@@ -12,6 +12,7 @@ interface CanvasBoardProps {
   onHover?: (coords: {x: number, y: number} | null) => void;
   tool: ToolMode;
   canvasElRef?: React.MutableRefObject<HTMLCanvasElement | null>;
+  canvasVersion?: number;
 }
 
 export const CanvasBoard: React.FC<CanvasBoardProps> = ({ 
@@ -22,7 +23,8 @@ export const CanvasBoard: React.FC<CanvasBoardProps> = ({
   setViewport,
   onHover,
   tool,
-  canvasElRef
+  canvasElRef,
+  canvasVersion
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -66,7 +68,7 @@ export const CanvasBoard: React.FC<CanvasBoardProps> = ({
 
   useEffect(() => {
     redrawAll();
-  }, [redrawAll]);
+  }, [redrawAll, canvasVersion]);
 
   // Bresenham's Line Algorithm
   const drawLine = (x0: number, y0: number, x1: number, y1: number) => {

@@ -50,12 +50,15 @@ export const useGameConnection = ({ onPixelUpdate, onFullUpdate }: UseGameConnec
     }
   }, [assembleChunks]);
 
+  console.log('[DEBUG] usePartySocket config → host:', JSON.stringify(PARTYKIT_HOST), 'room: canvas');
+  console.log('[DEBUG] VITE_PARTYKIT_HOST env:', JSON.stringify(import.meta.env.VITE_PARTYKIT_HOST));
+
   const socket = usePartySocket({
     host: PARTYKIT_HOST,
     room: 'canvas',
 
     onOpen() {
-      console.log('Connected to PartyKit at', PARTYKIT_HOST);
+      console.log('[DEBUG] ✅ WebSocket OPEN — connected to', PARTYKIT_HOST);
       setIsConnected(true);
       // Reset init state on reconnect
       initChunks.current = [];
@@ -63,13 +66,14 @@ export const useGameConnection = ({ onPixelUpdate, onFullUpdate }: UseGameConnec
       isReceivingInit.current = false;
     },
 
-    onClose() {
-      console.log('Disconnected from PartyKit');
+    onClose(event) {
+      console.log('[DEBUG] ❌ WebSocket CLOSED — code:', event.code, 'reason:', event.reason, 'wasClean:', event.wasClean);
       setIsConnected(false);
     },
 
     onError(e) {
-      console.error('PartySocket error:', e);
+      console.error('[DEBUG] ❌ PartySocket error:', e);
+      console.error('[DEBUG] Attempted host:', PARTYKIT_HOST);
     },
 
     onMessage(event) {
