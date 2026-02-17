@@ -1,0 +1,164 @@
+import type * as Party from "partykit/server";
+
+// --- Constants ---
+const WIDTH = 1920;
+const HEIGHT = 1080;
+const TOTAL_PIXELS = WIDTH * HEIGHT; // 2,073,600 bytes
+
+// Durable Object storage has a 128KB per-key limit.
+// We chunk the canvas into rows-per-chunk to stay well under that.
+const ROWS_PER_CHUNK = 64;
+const CHUNK_COUNT = Math.ceil(HEIGHT / ROWS_PER_CHUNK); // 17 chunks
+const SAVE_INTERVAL_MS = 30_000; // auto-save every 30s
+
+// --- Username Generator ---
+const ADJS = ["Neon", "Pixel", "Retro", "Mega", "Hyper", "Cyber", "Cool", "Rad", "Turbo", "Ultra"];
+const NOUNS = ["Cat", "Dog", "Fox", "Bot", "User", "Artist", "Glitch", "Wizard", "Panda", "Crab"];
+
+function generateName(): string {
+  const adj = ADJS[Math.floor(Math.random() * ADJS.length)];
+  const noun = NOUNS[Math.floor(Math.random() * NOUNS.length)];
+  const num = Math.floor(Math.random() * 100);
+  return `${adj}${noun}${num}`;
+}
+
+// --- PartyKit Server ---
+export default class PixelPlacerServer implements Party.Server {
+  canvas: Uint8Array;
+  usernames: Map<string, string>; // connection id -> username
+  dirty: boolean; // whether canvas has unsaved changes
+
+  constructor(readonly room: Party.Room) {
+    this.canvas = new Uint8Array(TOTAL_PIXELS);
+    this.usernames = new Map();
+    this.dirty = false;
+  }
+
+  // Called once when the room is first created or wakes from hibernation
+  async onStart(): Promise<void> {
+    await this.loadCanvas();
+    // Schedule periodic saves via alarm
+    this.room.storage.setAlarm(Date.now() + SAVE_INTERVAL_MS);
+  }
+
+  // Alarm fires periodically to save canvas state
+  async onAlarm(): Promise<void> {
+    if (this.dirty) {
+      await this.saveCanvas();
+      this.dirty = false;
+    }
+    // Re-schedule next alarm
+    this.room.storage.setAlarm(Date.now() + SAVE_INTERVAL_MS);
+  }
+
+  // Load canvas from durable storage (chunked)
+  async loadCanvas(): Promise<void> {
+    const keys = Array.from({ length: CHUNK_COUNT }, (_, i) => `canvas_chunk_${i}`);
+    const stored = await this.room.storage.get<number[]>(keys);
+
+    let loaded = false;
+    for (let i = 0; i < CHUNK_COUNT; i++) {
+      const chunk = stored.get(`canvas_chunk_${i}`);
+      if (chunk) {
+        const startRow = i * ROWS_PER_CHUNK;
+        const offset = startRow * WIDTH;
+        const arr = new Uint8Array(chunk);
+        this.canvas.set(arr, offset);
+        loaded = true;
+      }
+    }
+
+    if (loaded) {
+      console.log("Canvas loaded from storage.");
+    } else {
+      console.log("No saved canvas found. Starting fresh.");
+    }
+  }
+
+  // Save canvas to durable storage (chunked)
+  async saveCanvas(): Promise<void> {
+    const entries: Record<string, number[]> = {};
+
+    for (let i = 0; i < CHUNK_COUNT; i++) {
+      const startRow = i * ROWS_PER_CHUNK;
+      const endRow = Math.min(startRow + ROWS_PER_CHUNK, HEIGHT);
+      const offset = startRow * WIDTH;
+      const length = (endRow - startRow) * WIDTH;
+      const slice = this.canvas.slice(offset, offset + length);
+      entries[`canvas_chunk_${i}`] = Array.from(slice);
+    }
+
+    await this.room.storage.put(entries);
+    console.log("Canvas saved to storage.");
+  }
+
+  // Broadcast to all connections, optionally excluding one
+  broadcast(message: string | ArrayBuffer, exclude?: string): void {
+    for (const conn of this.room.getConnections()) {
+      if (conn.id !== exclude) {
+        conn.send(message);
+      }
+    }
+  }
+
+  broadcastUserCount(): void {
+    const count = [...this.room.getConnections()].length;
+    const msg = JSON.stringify({ type: "USER_COUNT", payload: count });
+    this.broadcast(msg);
+  }
+
+  // New client connects
+  async onConnect(conn: Party.Connection): Promise<void> {
+    const username = generateName();
+    this.usernames.set(conn.id, username);
+    console.log(`Connected: ${username} (${conn.id})`);
+
+    // Send full canvas state as binary
+    conn.send(this.canvas);
+
+    // Broadcast updated user count to everyone
+    this.broadcastUserCount();
+  }
+
+  // Receive a message from a client
+  async onMessage(message: string, sender: Party.Connection): Promise<void> {
+    try {
+      const parsed = JSON.parse(message);
+
+      if (parsed.type === "PLACE") {
+        const { x, y, colorIndex } = parsed.payload;
+
+        // Validate
+        if (
+          !Number.isInteger(x) || x < 0 || x >= WIDTH ||
+          !Number.isInteger(y) || y < 0 || y >= HEIGHT ||
+          !Number.isInteger(colorIndex) || colorIndex < 0 || colorIndex > 15
+        ) {
+          return;
+        }
+
+        // Update canvas
+        this.canvas[y * WIDTH + x] = colorIndex;
+        this.dirty = true;
+
+        // Broadcast update to everyone except sender (sender did optimistic update)
+        const updateMsg = JSON.stringify({
+          type: "UPDATE",
+          payload: { x, y, colorIndex, username: this.usernames.get(sender.id) },
+        });
+        this.broadcast(updateMsg, sender.id);
+      }
+    } catch (e) {
+      console.error("Invalid message:", e);
+    }
+  }
+
+  // Client disconnects
+  async onClose(conn: Party.Connection): Promise<void> {
+    this.usernames.delete(conn.id);
+    this.broadcastUserCount();
+  }
+}
+
+// PartyKit requires this
+PixelPlacerServer satisfies Party.Worker;

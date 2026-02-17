@@ -1,0 +1,5 @@
+{
+  "name": "PixelPlacer",
+  "description": "A real-time collaborative pixel art canvas featuring a 1920x1080 grid, live updates via PartyKit (Cloudflare Durable Objects), and efficient binary state synchronization.",
+  "requestFramePermissions": []
+}

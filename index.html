@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>PixelPlacer - Real-time Canvas</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      /* Prevent scrolling on mobile when interacting with canvas */
+      body {
+        overscroll-behavior: none;
+        background-color: #111;
+        color: #e5e5e5;
+        /* Dot matrix background for the 'void' */
+        background-image: radial-gradient(#333 1px, transparent 1px);
+        background-size: 20px 20px;
+      }
+      /* Ensure crisp pixel rendering */
+      canvas {
+        image-rendering: pixelated;
+        image-rendering: crisp-edges;
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@^19.2.4",
+    "react/": "https://esm.sh/react@^19.2.4/",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.4/"
+  }
+}
+</script>
+<link rel="stylesheet" href="/index.css">
+</head>
+  <body>
+    <div id="root"></div>
+  <script type="module" src="/index.tsx"></script>
+</body>
+</html>
