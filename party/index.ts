@@ -11,6 +11,10 @@ const ROWS_PER_CHUNK = 64;
 const CHUNK_COUNT = Math.ceil(HEIGHT / ROWS_PER_CHUNK); // 17 chunks
 const SAVE_INTERVAL_MS = 30_000; // auto-save every 30s
 
+// Cloudflare WebSocket messages have a ~1MB limit.
+// 1920*1080 = 2MB, so we must send initial state in chunks.
+const SEND_CHUNK_SIZE = 500_000; // 500KB per network chunk (well under 1MB)
+
 // --- Username Generator ---
 const ADJS = ["Neon", "Pixel", "Retro", "Mega", "Hyper", "Cyber", "Cool", "Rad", "Turbo", "Ultra"];
 const NOUNS = ["Cat", "Dog", "Fox", "Bot", "User", "Artist", "Glitch", "Wizard", "Panda", "Crab"];
@@ -113,8 +117,24 @@ export default class PixelPlacerServer implements Party.Server {
     this.usernames.set(conn.id, username);
     console.log(`Connected: ${username} (${conn.id})`);
 
-    // Send full canvas state as binary
-    conn.send(this.canvas);
+    // Send full canvas state as binary chunks (must stay under 1MB per message)
+    const totalChunks = Math.ceil(this.canvas.length / SEND_CHUNK_SIZE);
+
+    // Tell client how many binary chunks to expect
+    conn.send(JSON.stringify({
+      type: "INIT_START",
+      payload: { totalSize: this.canvas.length, chunks: totalChunks }
+    }));
+
+    // Send each chunk as raw binary
+    for (let i = 0; i < totalChunks; i++) {
+      const start = i * SEND_CHUNK_SIZE;
+      const end = Math.min(start + SEND_CHUNK_SIZE, this.canvas.length);
+      conn.send(this.canvas.slice(start, end));
+    }
+
+    // Signal init complete
+    conn.send(JSON.stringify({ type: "INIT_END" }));
 
     // Broadcast updated user count to everyone
     this.broadcastUserCount();

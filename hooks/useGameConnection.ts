@@ -18,13 +18,49 @@ export const useGameConnection = ({ onPixelUpdate, onFullUpdate }: UseGameConnec
   const onFullUpdateRef = useRef(onFullUpdate);
   onFullUpdateRef.current = onFullUpdate;
 
+  // Chunked init state — server sends canvas in multiple binary messages
+  const initChunks = useRef<Uint8Array[]>([]);
+  const initExpectedSize = useRef<number>(0);
+  const initReceived = useRef<number>(0);
+  const isReceivingInit = useRef<boolean>(false);
+
+  const assembleChunks = useCallback(() => {
+    const full = new Uint8Array(initExpectedSize.current);
+    let offset = 0;
+    for (const chunk of initChunks.current) {
+      full.set(chunk, offset);
+      offset += chunk.length;
+    }
+    // Reset
+    initChunks.current = [];
+    initReceived.current = 0;
+    isReceivingInit.current = false;
+    onFullUpdateRef.current(full);
+  }, []);
+
+  const processBinary = useCallback((buf: ArrayBuffer) => {
+    if (!isReceivingInit.current) return; // ignore unexpected binary
+    const uint8 = new Uint8Array(buf);
+    initChunks.current.push(uint8);
+    initReceived.current += uint8.length;
+
+    // If we've received all expected bytes, assemble
+    if (initReceived.current >= initExpectedSize.current) {
+      assembleChunks();
+    }
+  }, [assembleChunks]);
+
   const socket = usePartySocket({
     host: PARTYKIT_HOST,
     room: 'canvas',
 
     onOpen() {
-      console.log('Connected to PartyKit');
+      console.log('Connected to PartyKit at', PARTYKIT_HOST);
       setIsConnected(true);
+      // Reset init state on reconnect
+      initChunks.current = [];
+      initReceived.current = 0;
+      isReceivingInit.current = false;
     },
 
     onClose() {
@@ -32,30 +68,22 @@ export const useGameConnection = ({ onPixelUpdate, onFullUpdate }: UseGameConnec
       setIsConnected(false);
     },
 
-    onError() {
-      // PartySocket handles reconnection automatically
+    onError(e) {
+      console.error('PartySocket error:', e);
     },
 
     onMessage(event) {
       const { data } = event;
 
-      // Binary data = full grid state (INIT)
+      // Binary data = canvas init chunk
       if (data instanceof ArrayBuffer) {
-        const uint8 = new Uint8Array(data);
-        if (uint8.length === CANVAS_WIDTH * CANVAS_HEIGHT) {
-          onFullUpdateRef.current(uint8);
-        }
+        processBinary(data);
         return;
       }
 
-      // Blob → convert to ArrayBuffer (some environments send binary as Blob)
+      // Blob → convert to ArrayBuffer
       if (data instanceof Blob) {
-        data.arrayBuffer().then((buf) => {
-          const uint8 = new Uint8Array(buf);
-          if (uint8.length === CANVAS_WIDTH * CANVAS_HEIGHT) {
-            onFullUpdateRef.current(uint8);
-          }
-        });
+        data.arrayBuffer().then(processBinary);
         return;
       }
 
@@ -64,6 +92,19 @@ export const useGameConnection = ({ onPixelUpdate, onFullUpdate }: UseGameConnec
         try {
           const message = JSON.parse(data);
           switch (message.type) {
+            case 'INIT_START':
+              // Server is about to send canvas chunks
+              initChunks.current = [];
+              initReceived.current = 0;
+              initExpectedSize.current = message.payload.totalSize;
+              isReceivingInit.current = true;
+              break;
+            case 'INIT_END':
+              // Fallback: if we haven't assembled yet, do it now
+              if (isReceivingInit.current && initReceived.current >= initExpectedSize.current) {
+                assembleChunks();
+              }
+              break;
             case MessageType.UPDATE:
               onPixelUpdateRef.current(message.payload);
               break;
