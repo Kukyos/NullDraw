@@ -61,7 +61,7 @@ setInterval(saveCanvas, SNAPSHOT_INTERVAL_MS);
 // --- Server Setup ---
 const server = http.createServer((req, res) => {
   res.writeHead(200);
-  res.end('PixelPlacer Server Running');
+  res.end('NullDraw Server Running');
 });
 
 const wss = new WebSocketServer({ server });

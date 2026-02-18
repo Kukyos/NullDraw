@@ -1,4 +1,4 @@
-# PixelPlacer
+# NullDraw
 
 A real-time collaborative pixel art canvas — draw together with your friends!
 
@@ -47,7 +47,7 @@ npx partykit login
 npm run deploy:party
 ```
 
-This gives you a URL like `pixelplacer.<your-username>.partykit.dev`.
+This gives you a URL like `pixelplacer.<your-username>.partykit.dev` (the PartyKit project name is still `pixelplacer`).
 
 ### Frontend (Vercel)
 

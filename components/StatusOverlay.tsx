@@ -59,6 +59,8 @@ export const StatusOverlay: React.FC<StatusOverlayProps> = ({
   }, [cooldownExpiry]);
 
   const showBrushSize = currentTool === 'DRAW' || currentTool === 'ERASE';
+  const maxBrush = currentTool === 'ERASE' ? 10 : 5;
+  const quickButtons = currentTool === 'ERASE' ? [1, 2, 3, 5, 7, 10] : [1, 2, 3, 4, 5];
 
   return (
     <div className="pointer-events-none w-full h-full flex flex-col justify-between p-4 relative z-50">
@@ -126,13 +128,13 @@ export const StatusOverlay: React.FC<StatusOverlayProps> = ({
               <input
                 type="range"
                 min={1}
-                max={5}
-                value={brushSize}
+                max={maxBrush}
+                value={Math.min(brushSize, maxBrush)}
                 onChange={(e) => onBrushSizeChange(Number(e.target.value))}
                 className="w-24 accent-blue-500"
               />
               <div className="flex gap-1">
-                {[1, 2, 3, 4, 5].map(s => (
+                {quickButtons.map(s => (
                   <button
                     key={s}
                     onClick={() => onBrushSizeChange(s)}

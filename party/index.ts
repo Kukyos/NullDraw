@@ -39,7 +39,7 @@ function isValidPixel(x: number, y: number, colorIndex: number): boolean {
 }
 
 // --- PartyKit Server ---
-export default class PixelPlacerServer implements Party.Server {
+export default class NullDrawServer implements Party.Server {
   canvas: Uint8Array;
   usernames: Map<string, string>;
   dirty: boolean;
@@ -271,4 +271,4 @@ export default class PixelPlacerServer implements Party.Server {
   }
 }
 
-PixelPlacerServer satisfies Party.Worker;
+NullDrawServer satisfies Party.Worker;
