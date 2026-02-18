@@ -11,6 +11,7 @@
     "deploy:party": "npx partykit deploy"
   },
   "dependencies": {
+    "@jaames/iro": "^5.5.2",
     "partysocket": "^1.0.3",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"

@@ -4,14 +4,23 @@ export enum MessageType {
   COOLDOWN = 'COOLDOWN',
   ERROR = 'ERROR',
   USER_COUNT = 'USER_COUNT',
-  PLACE = 'PLACE'
+  PLACE = 'PLACE',
+  PLACE_BATCH = 'PLACE_BATCH',
+  UPDATE_BATCH = 'UPDATE_BATCH',
+  FILL = 'FILL',
+}
+
+export interface BatchPixel {
+  x: number;
+  y: number;
+  colorIndex: number;
 }
 
 export interface PixelData {
   x: number;
   y: number;
   colorIndex: number;
-  username?: string; // Who placed it
+  username?: string;
 }
 
 export interface ServerMessage {
@@ -41,7 +50,7 @@ export interface PaletteColor {
   name: string;
 }
 
-export type ToolMode = 'PAN' | 'DRAW';
+export type ToolMode = 'PAN' | 'DRAW' | 'ERASE' | 'FILL' | 'EYEDROPPER';
 
 export interface FloatingLabel {
   id: string;

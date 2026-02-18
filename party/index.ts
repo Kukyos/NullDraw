@@ -3,19 +3,15 @@ import type * as Party from "partykit/server";
 // --- Constants ---
 const WIDTH = 1920;
 const HEIGHT = 1080;
-const TOTAL_PIXELS = WIDTH * HEIGHT; // 2,073,600 bytes
+const TOTAL_PIXELS = WIDTH * HEIGHT;
 
-// Durable Object storage has a 128KB per-key limit.
-// We chunk the canvas into rows-per-chunk to stay well under that.
 const ROWS_PER_CHUNK = 64;
-const CHUNK_COUNT = Math.ceil(HEIGHT / ROWS_PER_CHUNK); // 17 chunks
-const SAVE_INTERVAL_MS = 30_000; // auto-save to durable storage every 30s (updates are broadcast live via WebSocket instantly)
+const CHUNK_COUNT = Math.ceil(HEIGHT / ROWS_PER_CHUNK);
+const SAVE_INTERVAL_MS = 30_000;
+const MAX_BATCH_PIXELS = 500;
+const MAX_FILL_PIXELS = 10_000;
 
-// Cloudflare WebSocket messages have a ~1MB limit.
-// 1920*1080 = 2MB, so we must send initial state in chunks.
-const SEND_CHUNK_SIZE = 500_000; // 500KB per network chunk (well under 1MB)
-
-// --- Username Generator ---
+// --- Helpers ---
 const ADJS = ["Neon", "Pixel", "Retro", "Mega", "Hyper", "Cyber", "Cool", "Rad", "Turbo", "Ultra"];
 const NOUNS = ["Cat", "Dog", "Fox", "Bot", "User", "Artist", "Glitch", "Wizard", "Panda", "Crab"];
 
@@ -26,7 +22,6 @@ function generateName(): string {
   return `${adj}${noun}${num}`;
 }
 
-// Encode Uint8Array → base64 string (works in CF Workers + Node)
 function uint8ToBase64(bytes: Uint8Array): string {
   let binary = '';
   for (let i = 0; i < bytes.length; i++) {
@@ -35,11 +30,19 @@ function uint8ToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+function isValidPixel(x: number, y: number, colorIndex: number): boolean {
+  return (
+    Number.isInteger(x) && x >= 0 && x < WIDTH &&
+    Number.isInteger(y) && y >= 0 && y < HEIGHT &&
+    Number.isInteger(colorIndex) && colorIndex >= 0 && colorIndex <= 15
+  );
+}
+
 // --- PartyKit Server ---
 export default class PixelPlacerServer implements Party.Server {
   canvas: Uint8Array;
-  usernames: Map<string, string>; // connection id -> username
-  dirty: boolean; // whether canvas has unsaved changes
+  usernames: Map<string, string>;
+  dirty: boolean;
 
   constructor(readonly room: Party.Room) {
     this.canvas = new Uint8Array(TOTAL_PIXELS);
@@ -47,7 +50,6 @@ export default class PixelPlacerServer implements Party.Server {
     this.dirty = false;
   }
 
-  // Called once when the room is first created or wakes from hibernation
   async onStart(): Promise<void> {
     try {
       await this.loadCanvas();
@@ -61,7 +63,6 @@ export default class PixelPlacerServer implements Party.Server {
     }
   }
 
-  // Alarm fires periodically to save canvas state
   async onAlarm(): Promise<void> {
     try {
       if (this.dirty) {
@@ -78,71 +79,102 @@ export default class PixelPlacerServer implements Party.Server {
     }
   }
 
-  // Load canvas from durable storage (chunked)
   async loadCanvas(): Promise<void> {
     const keys = Array.from({ length: CHUNK_COUNT }, (_, i) => `canvas_chunk_${i}`);
     const stored = await this.room.storage.get<number[]>(keys);
-
     let loaded = false;
     for (let i = 0; i < CHUNK_COUNT; i++) {
       const chunk = stored.get(`canvas_chunk_${i}`);
       if (chunk) {
         const startRow = i * ROWS_PER_CHUNK;
         const offset = startRow * WIDTH;
-        const arr = new Uint8Array(chunk);
-        this.canvas.set(arr, offset);
+        this.canvas.set(new Uint8Array(chunk), offset);
         loaded = true;
       }
     }
-
-    if (loaded) {
-      console.log("Canvas loaded from storage.");
-    } else {
-      console.log("No saved canvas found. Starting fresh.");
-    }
+    console.log(loaded ? "Canvas loaded from storage." : "No saved canvas. Starting fresh.");
   }
 
-  // Save canvas to durable storage (chunked)
   async saveCanvas(): Promise<void> {
     const entries: Record<string, number[]> = {};
-
     for (let i = 0; i < CHUNK_COUNT; i++) {
       const startRow = i * ROWS_PER_CHUNK;
       const endRow = Math.min(startRow + ROWS_PER_CHUNK, HEIGHT);
       const offset = startRow * WIDTH;
       const length = (endRow - startRow) * WIDTH;
-      const slice = this.canvas.slice(offset, offset + length);
-      entries[`canvas_chunk_${i}`] = Array.from(slice);
+      entries[`canvas_chunk_${i}`] = Array.from(this.canvas.slice(offset, offset + length));
     }
-
     await this.room.storage.put(entries);
-    console.log("Canvas saved to storage.");
+    console.log("Canvas saved.");
   }
 
-  // Broadcast to all connections, optionally excluding one
-  broadcast(message: string | ArrayBuffer, exclude?: string): void {
+  broadcast(message: string, exclude?: string): void {
     for (const conn of this.room.getConnections()) {
       if (conn.id !== exclude) {
-        conn.send(message);
+        try { conn.send(message); } catch (_) {}
       }
     }
   }
 
   broadcastUserCount(): void {
     const count = [...this.room.getConnections()].length;
-    const msg = JSON.stringify({ type: "USER_COUNT", payload: count });
-    this.broadcast(msg);
+    this.broadcast(JSON.stringify({ type: "USER_COUNT", payload: count }));
   }
 
-  // New client connects
+  // --- Flood fill (BFS, capped) ---
+  floodFill(startX: number, startY: number, newColor: number): Array<{x: number; y: number; colorIndex: number}> {
+    const targetColor = this.canvas[startY * WIDTH + startX];
+    if (targetColor === newColor) return [];
+
+    const changed: Array<{x: number; y: number; colorIndex: number}> = [];
+    const visited = new Set<number>();
+    const queue: Array<[number, number]> = [[startX, startY]];
+    visited.add(startY * WIDTH + startX);
+
+    while (queue.length > 0 && changed.length < MAX_FILL_PIXELS) {
+      const [x, y] = queue.shift()!;
+      const idx = y * WIDTH + x;
+
+      if (this.canvas[idx] !== targetColor) continue;
+
+      this.canvas[idx] = newColor;
+      changed.push({ x, y, colorIndex: newColor });
+
+      // 4-directional neighbors
+      for (const [nx, ny] of [[x-1,y],[x+1,y],[x,y-1],[x,y+1]]) {
+        if (nx >= 0 && nx < WIDTH && ny >= 0 && ny < HEIGHT) {
+          const nIdx = ny * WIDTH + nx;
+          if (!visited.has(nIdx) && this.canvas[nIdx] === targetColor) {
+            visited.add(nIdx);
+            queue.push([nx, ny]);
+          }
+        }
+      }
+    }
+
+    return changed;
+  }
+
+  // --- Connection ---
   async onConnect(conn: Party.Connection): Promise<void> {
     try {
-      const username = generateName();
+      // Read username from query params, fallback to generated name
+      let username = generateName();
+      try {
+        const url = new URL(conn.uri, "http://dummy");
+        const nameParam = url.searchParams.get("name");
+        if (nameParam && nameParam.trim().length > 0) {
+          // Sanitize: max 20 chars, alphanumeric + spaces + underscores
+          username = nameParam.trim().slice(0, 20).replace(/[^a-zA-Z0-9_ ]/g, '');
+          if (username.length === 0) username = generateName();
+        }
+      } catch (_) {}
+
       this.usernames.set(conn.id, username);
       console.log(`Connected: ${username} (${conn.id})`);
 
-      // Send canvas as base64-encoded text chunks (avoids binary WS issues on CF Workers)
-      const CHUNK_BYTES = 300_000; // 300K pixels per chunk → ~400KB base64 text
+      // Send canvas as base64-encoded text chunks
+      const CHUNK_BYTES = 300_000;
       const totalChunks = Math.ceil(this.canvas.length / CHUNK_BYTES);
 
       conn.send(JSON.stringify({
@@ -153,60 +185,90 @@ export default class PixelPlacerServer implements Party.Server {
       for (let i = 0; i < totalChunks; i++) {
         const start = i * CHUNK_BYTES;
         const end = Math.min(start + CHUNK_BYTES, this.canvas.length);
-        const chunk = this.canvas.slice(start, end);
         conn.send(JSON.stringify({
           type: "CANVAS_CHUNK",
-          payload: uint8ToBase64(chunk)
+          payload: uint8ToBase64(this.canvas.slice(start, end))
         }));
       }
 
       conn.send(JSON.stringify({ type: "INIT_END" }));
-
       this.broadcastUserCount();
     } catch (e) {
       console.error("Error in onConnect:", e);
     }
   }
 
-  // Receive a message from a client
+  // --- Messages ---
   async onMessage(message: string, sender: Party.Connection): Promise<void> {
     try {
       const parsed = JSON.parse(message);
+      const username = this.usernames.get(sender.id) || "???";
 
-      if (parsed.type === "PLACE") {
-        const { x, y, colorIndex } = parsed.payload;
+      switch (parsed.type) {
+        case "PLACE": {
+          const { x, y, colorIndex } = parsed.payload;
+          if (!isValidPixel(x, y, colorIndex)) return;
 
-        // Validate
-        if (
-          !Number.isInteger(x) || x < 0 || x >= WIDTH ||
-          !Number.isInteger(y) || y < 0 || y >= HEIGHT ||
-          !Number.isInteger(colorIndex) || colorIndex < 0 || colorIndex > 15
-        ) {
-          return;
+          this.canvas[y * WIDTH + x] = colorIndex;
+          this.dirty = true;
+
+          this.broadcast(JSON.stringify({
+            type: "UPDATE",
+            payload: { x, y, colorIndex, username },
+          }), sender.id);
+          break;
         }
 
-        // Update canvas
-        this.canvas[y * WIDTH + x] = colorIndex;
-        this.dirty = true;
+        case "PLACE_BATCH": {
+          const pixels = parsed.payload?.pixels;
+          if (!Array.isArray(pixels)) return;
 
-        // Broadcast update to everyone except sender (sender did optimistic update)
-        const updateMsg = JSON.stringify({
-          type: "UPDATE",
-          payload: { x, y, colorIndex, username: this.usernames.get(sender.id) },
-        });
-        this.broadcast(updateMsg, sender.id);
+          const valid: Array<{x: number; y: number; colorIndex: number}> = [];
+          const limit = Math.min(pixels.length, MAX_BATCH_PIXELS);
+
+          for (let i = 0; i < limit; i++) {
+            const { x, y, colorIndex } = pixels[i];
+            if (isValidPixel(x, y, colorIndex)) {
+              this.canvas[y * WIDTH + x] = colorIndex;
+              valid.push({ x, y, colorIndex });
+            }
+          }
+
+          if (valid.length > 0) {
+            this.dirty = true;
+            this.broadcast(JSON.stringify({
+              type: "UPDATE_BATCH",
+              payload: { pixels: valid, username },
+            }), sender.id);
+          }
+          break;
+        }
+
+        case "FILL": {
+          const { x, y, colorIndex } = parsed.payload;
+          if (!isValidPixel(x, y, colorIndex)) return;
+
+          const changed = this.floodFill(x, y, colorIndex);
+          if (changed.length > 0) {
+            this.dirty = true;
+            // Broadcast to ALL including sender (server computed the fill result)
+            this.broadcast(JSON.stringify({
+              type: "UPDATE_BATCH",
+              payload: { pixels: changed, username },
+            }));
+          }
+          break;
+        }
       }
     } catch (e) {
       console.error("Invalid message:", e);
     }
   }
 
-  // Client disconnects
   async onClose(conn: Party.Connection): Promise<void> {
     this.usernames.delete(conn.id);
     this.broadcastUserCount();
   }
 }
 
-// PartyKit requires this
 PixelPlacerServer satisfies Party.Worker;

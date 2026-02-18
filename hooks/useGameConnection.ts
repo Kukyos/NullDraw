@@ -1,9 +1,8 @@
 import { useRef, useState, useCallback } from 'react';
 import usePartySocket from 'partysocket/react';
 import { CANVAS_WIDTH, CANVAS_HEIGHT, PARTYKIT_HOST } from '../constants';
-import { MessageType, PixelData } from '../types';
+import { MessageType, PixelData, BatchPixel } from '../types';
 
-// Decode base64 string → Uint8Array
 function base64ToUint8(b64: string): Uint8Array {
   const raw = atob(b64);
   const arr = new Uint8Array(raw.length);
@@ -15,20 +14,23 @@ function base64ToUint8(b64: string): Uint8Array {
 
 interface UseGameConnectionProps {
   onPixelUpdate: (pixel: PixelData) => void;
+  onBatchUpdate: (pixels: PixelData[]) => void;
   onFullUpdate: (buffer: Uint8Array) => void;
+  username: string;
 }
 
-export const useGameConnection = ({ onPixelUpdate, onFullUpdate }: UseGameConnectionProps) => {
+export const useGameConnection = ({ onPixelUpdate, onBatchUpdate, onFullUpdate, username }: UseGameConnectionProps) => {
   const [isConnected, setIsConnected] = useState(false);
   const [userCount, setUserCount] = useState(0);
 
-  // Store callbacks in refs so the socket doesn't reconnect when they change
   const onPixelUpdateRef = useRef(onPixelUpdate);
   onPixelUpdateRef.current = onPixelUpdate;
+  const onBatchUpdateRef = useRef(onBatchUpdate);
+  onBatchUpdateRef.current = onBatchUpdate;
   const onFullUpdateRef = useRef(onFullUpdate);
   onFullUpdateRef.current = onFullUpdate;
 
-  // Chunked init state — server sends canvas in multiple binary messages
+  // Chunked init state
   const initChunks = useRef<Uint8Array[]>([]);
   const initExpectedSize = useRef<number>(0);
   const initReceived = useRef<number>(0);
@@ -41,7 +43,6 @@ export const useGameConnection = ({ onPixelUpdate, onFullUpdate }: UseGameConnec
       full.set(chunk, offset);
       offset += chunk.length;
     }
-    // Reset
     initChunks.current = [];
     initReceived.current = 0;
     isReceivingInit.current = false;
@@ -49,72 +50,58 @@ export const useGameConnection = ({ onPixelUpdate, onFullUpdate }: UseGameConnec
   }, []);
 
   const processBinary = useCallback((buf: ArrayBuffer) => {
-    if (!isReceivingInit.current) return; // ignore unexpected binary
+    if (!isReceivingInit.current) return;
     const uint8 = new Uint8Array(buf);
     initChunks.current.push(uint8);
     initReceived.current += uint8.length;
-
-    // If we've received all expected bytes, assemble
     if (initReceived.current >= initExpectedSize.current) {
       assembleChunks();
     }
   }, [assembleChunks]);
 
-  console.log('[DEBUG] usePartySocket config → host:', JSON.stringify(PARTYKIT_HOST), 'room: canvas');
-  console.log('[DEBUG] VITE_PARTYKIT_HOST env:', JSON.stringify(import.meta.env.VITE_PARTYKIT_HOST));
-
   const socket = usePartySocket({
     host: PARTYKIT_HOST,
     room: 'canvas',
+    query: { name: username },
 
     onOpen() {
-      console.log('[DEBUG] ✅ WebSocket OPEN — connected to', PARTYKIT_HOST);
       setIsConnected(true);
-      // Reset init state on reconnect
       initChunks.current = [];
       initReceived.current = 0;
       isReceivingInit.current = false;
     },
 
-    onClose(event) {
-      console.log('[DEBUG] ❌ WebSocket CLOSED — code:', event.code, 'reason:', event.reason, 'wasClean:', event.wasClean);
+    onClose() {
       setIsConnected(false);
     },
 
     onError(e) {
-      console.error('[DEBUG] ❌ PartySocket error:', e);
-      console.error('[DEBUG] Attempted host:', PARTYKIT_HOST);
+      console.error('PartySocket error:', e);
     },
 
     onMessage(event) {
       const { data } = event;
 
-      // Binary data = canvas init chunk
       if (data instanceof ArrayBuffer) {
         processBinary(data);
         return;
       }
-
-      // Blob → convert to ArrayBuffer
       if (data instanceof Blob) {
         data.arrayBuffer().then(processBinary);
         return;
       }
 
-      // Text data = JSON message
       if (typeof data === 'string') {
         try {
           const message = JSON.parse(data);
           switch (message.type) {
             case 'INIT_START':
-              // Server is about to send canvas chunks
               initChunks.current = [];
               initReceived.current = 0;
               initExpectedSize.current = message.payload.totalSize;
               isReceivingInit.current = true;
               break;
             case 'CANVAS_CHUNK': {
-              // Server sends canvas data as base64-encoded text chunks
               if (!isReceivingInit.current) break;
               const decoded = base64ToUint8(message.payload);
               initChunks.current.push(decoded);
@@ -125,7 +112,6 @@ export const useGameConnection = ({ onPixelUpdate, onFullUpdate }: UseGameConnec
               break;
             }
             case 'INIT_END':
-              // Fallback: if we haven't assembled yet, do it now
               if (isReceivingInit.current && initReceived.current >= initExpectedSize.current) {
                 assembleChunks();
               }
@@ -133,6 +119,15 @@ export const useGameConnection = ({ onPixelUpdate, onFullUpdate }: UseGameConnec
             case MessageType.UPDATE:
               onPixelUpdateRef.current(message.payload);
               break;
+            case MessageType.UPDATE_BATCH:
+            case 'UPDATE_BATCH': {
+              const { pixels, username: uname } = message.payload;
+              if (Array.isArray(pixels)) {
+                const withName = pixels.map((p: BatchPixel) => ({ ...p, username: uname }));
+                onBatchUpdateRef.current(withName);
+              }
+              break;
+            }
             case MessageType.USER_COUNT:
               setUserCount(message.payload);
               break;
@@ -156,5 +151,23 @@ export const useGameConnection = ({ onPixelUpdate, onFullUpdate }: UseGameConnec
     }
   }, [socket]);
 
-  return { isConnected, userCount, placePixel, cooldown: 0 };
+  const placePixelBatch = useCallback((pixels: BatchPixel[]) => {
+    if (socket && socket.readyState === WebSocket.OPEN && pixels.length > 0) {
+      socket.send(JSON.stringify({
+        type: MessageType.PLACE_BATCH,
+        payload: { pixels }
+      }));
+    }
+  }, [socket]);
+
+  const sendFill = useCallback((x: number, y: number, colorIndex: number) => {
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({
+        type: MessageType.FILL,
+        payload: { x, y, colorIndex }
+      }));
+    }
+  }, [socket]);
+
+  return { isConnected, userCount, placePixel, placePixelBatch, sendFill };
 };
